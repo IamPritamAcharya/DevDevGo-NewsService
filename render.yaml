@@ -1,10 +1,11 @@
 services:
   - type: web
-    name: news-service
-    env: java
-    buildCommand: ./mvnw clean package -DskipTests
-    startCommand: java -jar target/news-service-0.0.1-SNAPSHOT.jar
+    name: devdevgo-news-service
+    runtime: docker
     plan: free
+    branch: main
+    autoDeployTrigger: on_commit
+    healthCheckPath: /api/health
     envVars:
       - key: GNEWS_API_KEY
         sync: false
@@ -19,4 +20,4 @@ services:
       - key: FIREBASE_DATABASE_URL
         sync: false
       - key: FIREBASE_CREDENTIALS_PATH
-        value: firebase-service-account.json
+        value: /etc/secrets/firebase-service-account.json
