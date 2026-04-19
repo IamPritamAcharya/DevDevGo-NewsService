@@ -8,9 +8,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-import java.io.FileInputStream;
-import java.io.IOException;
-import java.io.InputStream;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
 
 @Slf4j
 @Configuration
@@ -29,14 +28,25 @@ public class FirebaseConfig {
         }
 
         InputStream serviceAccount;
-        // Try classpath first, then file system
-        InputStream classPathStream = getClass().getClassLoader().getResourceAsStream(credentialsPath);
-        if (classPathStream != null) {
-            serviceAccount = classPathStream;
-            log.info("Firebase: loaded credentials from classpath: {}", credentialsPath);
+
+        // 🔥 NEW: Check ENV JSON first
+        String firebaseCredentialsJson = System.getenv("FIREBASE_CREDENTIALS");
+
+        if (firebaseCredentialsJson != null && !firebaseCredentialsJson.isEmpty()) {
+            serviceAccount = new ByteArrayInputStream(
+                    firebaseCredentialsJson.getBytes(StandardCharsets.UTF_8));
+            log.info("Firebase: loaded credentials from ENV JSON");
         } else {
-            serviceAccount = new FileInputStream(credentialsPath);
-            log.info("Firebase: loaded credentials from filesystem: {}", credentialsPath);
+            // Existing logic (unchanged)
+            InputStream classPathStream = getClass().getClassLoader().getResourceAsStream(credentialsPath);
+
+            if (classPathStream != null) {
+                serviceAccount = classPathStream;
+                log.info("Firebase: loaded credentials from classpath: {}", credentialsPath);
+            } else {
+                serviceAccount = new FileInputStream(credentialsPath);
+                log.info("Firebase: loaded credentials from filesystem: {}", credentialsPath);
+            }
         }
 
         FirebaseOptions options = FirebaseOptions.builder()
