@@ -175,9 +175,6 @@ public class SummarizationEngine {
                 .build();
     }
 
-    /**
-     * Generate a stable ID from URL to ensure idempotency.
-     */
     private String generateId(Article article) {
         String base = article.getNormalizedUrl() != null
                 ? article.getNormalizedUrl()

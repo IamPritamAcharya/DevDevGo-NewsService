@@ -23,12 +23,14 @@ public class NewsPipelineScheduler {
     @Value("${news.pipeline.interval-hours:1}")
     private int intervalHours;
 
+    @Value("${news.pipeline.max-articles:150}")
+    private int maxArticles;
+
+    @Value("${news.pipeline.delete-batch:50}")
+    private int deleteBatch;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    /**
-     * Fires every hour. initialDelay = 1 hour so it doesn't fire on startup
-     * (startup recovery handles that separately via CommandLineRunner).
-     */
     @Scheduled(fixedDelay = 3600000, initialDelay = 3600000)
     public void scheduledRun() {
         log.info("[Scheduler] Hourly trigger fired");
@@ -45,12 +47,6 @@ public class NewsPipelineScheduler {
         triggerIfNeeded("external");
     }
 
-    /**
-     * Core state-driven logic:
-     * 1. Read lastFetchedAt from Firebase (auto-creates doc if missing)
-     * 2. Check if intervalHours has elapsed
-     * 3. Run pipeline only if needed
-     */
     private void triggerIfNeeded(String source) {
         if (!running.compareAndSet(false, true)) {
             log.info("[{}] Pipeline already running, skipping duplicate trigger", source);
@@ -66,6 +62,9 @@ public class NewsPipelineScheduler {
                 runPipeline(source);
                 return;
             }
+
+            // Always trim old articles on every check, regardless of whether pipeline runs
+            trimOldArticles(source);
 
             Instant lastRun = state.getLastFetchedAt();
             Duration elapsed = Duration.between(lastRun, Instant.now());
@@ -88,6 +87,16 @@ public class NewsPipelineScheduler {
             runPipeline(source);
         } finally {
             running.set(false);
+        }
+    }
+
+    private void trimOldArticles(String source) {
+        try {
+            log.info("[{}] Checking article count for trim...", source);
+            storageService.trimArticlesIfNeeded(maxArticles, deleteBatch).block();
+        } catch (Exception e) {
+            // Non-fatal — log and continue. Don't let trim failure block the pipeline.
+            log.warn("[{}] Article trim failed (non-fatal): {}", source, e.getMessage());
         }
     }
 

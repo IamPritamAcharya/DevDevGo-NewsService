@@ -37,64 +37,90 @@ public class NewsPipelineOrchestrator {
         AtomicInteger savedCount = new AtomicInteger(0);
         List<NewsArticle> allSaved = new ArrayList<>();
 
-        return fetcherService.fetchAll()
-                .collectList()
-                .flatMap(rawArticles -> {
-                    log.info("[Pipeline] Fetched {} raw articles", rawArticles.size());
-                    if (rawArticles.isEmpty()) {
-                        return Mono.error(new RuntimeException("No articles fetched from any source"));
-                    }
-                    return deduplicationEngine.deduplicate(rawArticles);
-                })
-                .map(uniqueArticles -> {
-                    log.info("[Pipeline] After dedup: {} articles", uniqueArticles.size());
-                    List<Article> ranked = rankingEngine.rank(uniqueArticles);
-                    log.info("[Pipeline] After ranking: {} articles selected", ranked.size());
-                    return ranked;
-                })
-                .flatMapMany(rankedArticles ->
+        // ── Save "running" state immediately so Render's sleep-check sees a
+        // recent timestamp even if the service dies mid-run. ──────────────
+        return markRunning()
+                .then(fetcherService.fetchAll()
+                        .collectList()
+                        .flatMap(rawArticles -> {
+                            log.info("[Pipeline] Fetched {} raw articles", rawArticles.size());
+                            if (rawArticles.isEmpty()) {
+                                return Mono.error(new RuntimeException("No articles fetched from any source"));
+                            }
+                            return deduplicationEngine.deduplicate(rawArticles);
+                        })
+                        .map(uniqueArticles -> {
+                            log.info("[Pipeline] After dedup: {} articles", uniqueArticles.size());
+                            List<Article> ranked = rankingEngine.rank(uniqueArticles);
+                            log.info("[Pipeline] After ranking: {} articles selected", ranked.size());
+                            return ranked;
+                        })
+                        .flatMapMany(rankedArticles -> summarizationEngine.summarize(rankedArticles))
+                        .flatMap(article -> storageService.saveArticles(List.of(article))
+                                .doOnSuccess(count -> {
+                                    int total = savedCount.addAndGet(count);
+                                    allSaved.add(article);
+                                    log.info("[Pipeline] Saved article {}/{}: '{}'",
+                                            total, "30", article.getTitle());
+                                })
+                                .onErrorResume(e -> {
+                                    log.error("[Pipeline] Failed to save '{}': {}", article.getTitle(), e.getMessage());
+                                    return Mono.just(0);
+                                }), 1)
+                        .collectList()
+                        .flatMap(results -> {
+                            int total = savedCount.get();
+                            log.info("[Pipeline] All done — {} articles saved to Firebase", total);
 
-                summarizationEngine.summarize(rankedArticles))
-                .flatMap(article -> storageService.saveArticles(List.of(article))
+                            if (total == 0) {
+                                return updateStateFailure("0 articles saved").thenReturn(-1);
+                            }
+
+                            return storageService.saveToDeduplicationMemory(allSaved)
+                                    .then(updateStateSuccess(total))
+                                    .thenReturn(total);
+                        })
                         .doOnSuccess(count -> {
-                            int total = savedCount.addAndGet(count);
-                            allSaved.add(article);
-                            log.info("[Pipeline] Saved article {}/{}: '{}'",
-                                    total, "30", article.getTitle());
+                            log.info("╔══════════════════════════════════════════════════");
+                            log.info("║  PIPELINE COMPLETE — {} articles stored", count);
+                            log.info("╚══════════════════════════════════════════════════");
                         })
                         .onErrorResume(e -> {
+                            log.error("╔══════════════════════════════════════════════════");
+                            log.error("║  PIPELINE FAILED: {}", e.getMessage());
+                            log.error("╚══════════════════════════════════════════════════");
+                            int partial = savedCount.get();
+                            if (partial > 0) {
+                                log.info("[Pipeline] Partial success — {} articles were already saved", partial);
+                                return updateStateSuccess(partial).thenReturn(partial);
+                            }
+                            return updateStateFailure(e.getMessage()).thenReturn(-1);
+                        }));
+    }
 
-                            log.error("[Pipeline] Failed to save '{}': {}", article.getTitle(), e.getMessage());
-                            return Mono.just(0);
-                        }), 1)
-                .collectList()
-                .flatMap(results -> {
-                    int total = savedCount.get();
-                    log.info("[Pipeline] All done — {} articles saved to Firebase", total);
-
-                    if (total == 0) {
-                        return updateStateFailure("0 articles saved").thenReturn(-1);
-                    }
-
-                    return storageService.saveToDeduplicationMemory(allSaved)
-                            .then(updateStateSuccess(total))
-                            .thenReturn(total);
-                })
-                .doOnSuccess(count -> {
-                    log.info("╔══════════════════════════════════════════════════");
-                    log.info("║  PIPELINE COMPLETE — {} articles stored", count);
-                    log.info("╚══════════════════════════════════════════════════");
-                })
+    /**
+     * Writes a "running" heartbeat to Firebase immediately when the pipeline
+     * starts.
+     * This ensures the system_state document's lastFetchedAt is updated even if the
+     * service is killed or Render puts it to sleep before all articles finish
+     * saving.
+     *
+     * The scheduler's "has enough time elapsed?" check uses lastFetchedAt, so
+     * writing
+     * it now prevents a duplicate run from firing on the next wake-up.
+     */
+    private Mono<Void> markRunning() {
+        return storageService.updateSystemState(
+                SystemState.builder()
+                        .lastFetchedAt(Instant.now())
+                        .lastRunStatus("running")
+                        .lastArticleCount(0)
+                        .build())
+                .doOnSuccess(v -> log.info("[Pipeline] Marked system state as 'running'"))
                 .onErrorResume(e -> {
-                    log.error("╔══════════════════════════════════════════════════");
-                    log.error("║  PIPELINE FAILED: {}", e.getMessage());
-                    log.error("╚══════════════════════════════════════════════════");
-                    int partial = savedCount.get();
-                    if (partial > 0) {
-                        log.info("[Pipeline] Partial success — {} articles were already saved", partial);
-                        return updateStateSuccess(partial).thenReturn(partial);
-                    }
-                    return updateStateFailure(e.getMessage()).thenReturn(-1);
+                    // Non-fatal — log and continue. A failure here must not abort the pipeline.
+                    log.warn("[Pipeline] Could not mark state as running (non-fatal): {}", e.getMessage());
+                    return Mono.empty();
                 });
     }
 

@@ -26,7 +26,6 @@ public class FirebaseStorageService {
     private static final String COLLECTION_RECENT_ARTICLES = "recent_articles";
     private static final String STATE_DOC = "news_fetch";
 
-
     public Mono<SystemState> getSystemState() {
         return Mono.fromCallable(() -> {
             Firestore db = FirestoreClient.getFirestore(firebaseApp);
@@ -82,7 +81,59 @@ public class FirebaseStorageService {
         }).subscribeOn(Schedulers.boundedElastic()).then();
     }
 
-   
+    /**
+     * Checks total article count in Firebase. If over maxArticles, deletes the
+     * oldest `deleteCount` articles sorted by publishedAt ascending.
+     * Called on startup before the pipeline runs.
+     */
+    public Mono<Void> trimArticlesIfNeeded(int maxArticles, int deleteCount) {
+        return Mono.fromCallable(() -> {
+            Firestore db = FirestoreClient.getFirestore(firebaseApp);
+
+            // Count total articles
+            QuerySnapshot allSnapshot = db.collection(COLLECTION_NEWS).get().get();
+            int total = allSnapshot.size();
+            log.info("[Trim] Total articles in Firebase: {}", total);
+
+            if (total <= maxArticles) {
+                log.info("[Trim] Under limit ({}/{}), no deletion needed", total, maxArticles);
+                return null;
+            }
+
+            log.info("[Trim] Over limit ({}/{}), deleting {} oldest articles by publishedAt",
+                    total, maxArticles, deleteCount);
+
+            // Fetch oldest `deleteCount` articles sorted by publishedAt ascending
+            QuerySnapshot oldestSnapshot = db.collection(COLLECTION_NEWS)
+                    .orderBy("publishedAt", Query.Direction.ASCENDING)
+                    .limit(deleteCount)
+                    .get().get();
+
+            if (oldestSnapshot.isEmpty()) {
+                log.warn("[Trim] No articles found to delete");
+                return null;
+            }
+
+            WriteBatch batch = db.batch();
+            int batchCount = 0;
+
+            for (DocumentSnapshot doc : oldestSnapshot.getDocuments()) {
+                batch.delete(doc.getReference());
+                batchCount++;
+
+                // Firestore batch limit is 500 — flush and start new batch if needed
+                if (batchCount % 490 == 0) {
+                    batch.commit().get();
+                    batch = db.batch();
+                }
+            }
+            batch.commit().get();
+
+            log.info("[Trim] Deleted {} oldest articles", oldestSnapshot.size());
+            return null;
+        }).subscribeOn(Schedulers.boundedElastic()).then();
+    }
+
     public Mono<Integer> saveArticles(List<NewsArticle> articles) {
         return Mono.fromCallable(() -> {
             Firestore db = FirestoreClient.getFirestore(firebaseApp);
@@ -120,7 +171,6 @@ public class FirebaseStorageService {
         map.put("tags", article.getTags() != null ? article.getTags() : List.of());
         return map;
     }
-
 
     public Mono<List<Map<String, String>>> getRecentArticleMemory(int memoryHours) {
         return Mono.fromCallable(() -> {

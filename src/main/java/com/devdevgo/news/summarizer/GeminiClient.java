@@ -28,30 +28,60 @@ public class GeminiClient {
     @Value("${news.api.gemini-key-primary}")
     private String primaryKey;
 
-    @Value("${news.api.gemini-key-fallback}")
-    private String fallbackKey;
+    @Value("${news.api.gemini-key-fallback1}")
+    private String fallbackKey1;
+
+    @Value("${news.api.gemini-key-fallback2}")
+    private String fallbackKey2;
+
+    @Value("${news.api.gemini-key-fallback3}")
+    private String fallbackKey3;
 
     private static final String GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
     private static final String MODEL = "gemini-2.5-flash-lite";
 
+    /**
+     * Tries each API key in sequence with limited retries per key.
+     * If a key fails with 429 after retries, moves on to the next.
+     * If ALL keys are exhausted, propagates a terminal error — no further looping.
+     */
     public Mono<String> generateSummary(String prompt) {
-        return callGeminiWithRetry(prompt, primaryKey)
-                .onErrorResume(e -> {
-                    log.warn("[Gemini] Primary key exhausted after retries ({}), trying fallback key...",
-                            e.getMessage());
-                    return callGeminiWithRetry(prompt, fallbackKey);
+        return callWithLimitedRetry(prompt, primaryKey, "primary")
+                .onErrorResume(AllKeysExhaustedException.class, e -> Mono.error(e)) // already done
+                .onErrorResume(e -> !(e instanceof AllKeysExhaustedException), e -> {
+                    log.warn("[Gemini] Primary key failed ({}), trying fallback-1...", e.getMessage());
+                    return callWithLimitedRetry(prompt, fallbackKey1, "fallback-1");
+                })
+                .onErrorResume(e -> !(e instanceof AllKeysExhaustedException), e -> {
+                    log.warn("[Gemini] Fallback-1 failed ({}), trying fallback-2...", e.getMessage());
+                    return callWithLimitedRetry(prompt, fallbackKey2, "fallback-2");
+                })
+                .onErrorResume(e -> !(e instanceof AllKeysExhaustedException), e -> {
+                    log.warn("[Gemini] Fallback-2 failed ({}), trying fallback-3...", e.getMessage());
+                    return callWithLimitedRetry(prompt, fallbackKey3, "fallback-3")
+                            .onErrorMap(ex -> {
+                                log.error("[Gemini] All 4 API keys exhausted. Giving up.");
+                                return new AllKeysExhaustedException("All Gemini API keys exhausted", ex);
+                            });
                 });
     }
 
-    private Mono<String> callGeminiWithRetry(String prompt, String apiKey) {
+    /**
+     * Retries a single key up to 3 times on 429, with exponential backoff capped at
+     * 2 minutes.
+     * Non-429 errors are NOT retried — they propagate immediately to trigger the
+     * next key.
+     */
+    private Mono<String> callWithLimitedRetry(String prompt, String apiKey, String keyLabel) {
         return callGemini(prompt, apiKey)
                 .retryWhen(Retry.backoff(3, Duration.ofSeconds(30))
-                        .maxBackoff(Duration.ofHours(1))
+                        .maxBackoff(Duration.ofMinutes(2))
                         .filter(e -> is429(e))
                         .doBeforeRetry(signal -> log.warn(
-                                "[Gemini] 429 rate limit hit — waiting before retry #{} (backoff: {}s)...",
-                                signal.totalRetries() + 1,
-                                30 * (signal.totalRetries() + 1))));
+                                "[Gemini][{}] 429 rate limit — retry #{} of 3",
+                                keyLabel, signal.totalRetries() + 1))
+                        // After 3 retries all gave 429, wrap so the next key is tried
+                        .onRetryExhaustedThrow((spec, signal) -> signal.failure()));
     }
 
     private Mono<String> callGemini(String prompt, String apiKey) {
@@ -92,6 +122,16 @@ public class GeminiClient {
         } catch (Exception e) {
             log.warn("[Gemini] Failed to extract text from response: {}", e.getMessage());
             return "";
+        }
+    }
+
+    /**
+     * Sentinel exception to signal all keys are done — prevents further
+     * onErrorResume chains.
+     */
+    public static class AllKeysExhaustedException extends RuntimeException {
+        public AllKeysExhaustedException(String message, Throwable cause) {
+            super(message, cause);
         }
     }
 }
