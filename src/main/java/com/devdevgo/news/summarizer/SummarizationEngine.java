@@ -35,6 +35,7 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class SummarizationEngine {
 
+    
     private final GeminiClient geminiClient;
     private final ContentCleaner contentCleaner;
 
