@@ -1,4 +1,6 @@
+.env
 HELP.md
+firebase-service-account.json
 target/
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/

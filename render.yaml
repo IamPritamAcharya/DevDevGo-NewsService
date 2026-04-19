@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: news-service
+    env: java
+    buildCommand: ./mvnw clean package -DskipTests
+    startCommand: java -jar target/news-service-0.0.1-SNAPSHOT.jar
+    plan: free
+    envVars:
+      - key: GNEWS_API_KEY
+        sync: false
+      - key: REDDIT_CLIENT_ID
+        sync: false
+      - key: REDDIT_CLIENT_SECRET
+        sync: false
+      - key: GEMINI_API_KEY_PRIMARY
+        sync: false
+      - key: GEMINI_API_KEY_FALLBACK
+        sync: false
+      - key: FIREBASE_DATABASE_URL
+        sync: false
+      - key: FIREBASE_CREDENTIALS_PATH
+        value: firebase-service-account.json
