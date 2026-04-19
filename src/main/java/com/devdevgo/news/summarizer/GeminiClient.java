@@ -13,9 +13,12 @@ import reactor.core.publisher.Mono;
 import reactor.util.retry.Retry;
 import org.springframework.web.reactive.function.client.WebClient;
 
+import jakarta.annotation.PostConstruct;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 @Component
@@ -40,37 +43,67 @@ public class GeminiClient {
     private static final String GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
     private static final String MODEL = "gemini-2.5-flash-lite";
 
+    // Tracks which key we're currently on. Moves forward only, never back.
+    private final AtomicInteger currentKeyIndex = new AtomicInteger(0);
+    private List<String> keys;
+    private List<String> keyLabels;
+
+    @PostConstruct
+    public void init() {
+        keys = new ArrayList<>();
+        keys.add(primaryKey);
+        keys.add(fallbackKey1);
+        keys.add(fallbackKey2);
+        keys.add(fallbackKey3);
+
+        keyLabels = List.of("primary", "fallback-1", "fallback-2", "fallback-3");
+    }
+
     /**
-     * Tries each API key in sequence with limited retries per key.
-     * If a key fails with 429 after retries, moves on to the next.
-     * If ALL keys are exhausted, propagates a terminal error — no further looping.
+     * Uses the current active key. If it fails after 3 retries (429) or immediately
+     * (403/other),
+     * permanently advances to the next key and tries that. Never goes back to a
+     * previous key.
+     * If all keys are exhausted, throws AllKeysExhaustedException.
      */
     public Mono<String> generateSummary(String prompt) {
-        return callWithLimitedRetry(prompt, primaryKey, "primary")
-                .onErrorResume(AllKeysExhaustedException.class, e -> Mono.error(e)) // already done
-                .onErrorResume(e -> !(e instanceof AllKeysExhaustedException), e -> {
-                    log.warn("[Gemini] Primary key failed ({}), trying fallback-1...", e.getMessage());
-                    return callWithLimitedRetry(prompt, fallbackKey1, "fallback-1");
-                })
-                .onErrorResume(e -> !(e instanceof AllKeysExhaustedException), e -> {
-                    log.warn("[Gemini] Fallback-1 failed ({}), trying fallback-2...", e.getMessage());
-                    return callWithLimitedRetry(prompt, fallbackKey2, "fallback-2");
-                })
-                .onErrorResume(e -> !(e instanceof AllKeysExhaustedException), e -> {
-                    log.warn("[Gemini] Fallback-2 failed ({}), trying fallback-3...", e.getMessage());
-                    return callWithLimitedRetry(prompt, fallbackKey3, "fallback-3")
-                            .onErrorMap(ex -> {
-                                log.error("[Gemini] All 4 API keys exhausted. Giving up.");
-                                return new AllKeysExhaustedException("All Gemini API keys exhausted", ex);
-                            });
+        return tryFromCurrentKey(prompt);
+    }
+
+    private Mono<String> tryFromCurrentKey(String prompt) {
+        int index = currentKeyIndex.get();
+
+        if (index >= keys.size()) {
+            log.error("[Gemini] All {} keys exhausted — cannot summarize", keys.size());
+            return Mono.error(new AllKeysExhaustedException("All Gemini API keys exhausted"));
+        }
+
+        String apiKey = keys.get(index);
+        String label = keyLabels.get(index);
+
+        return callWithLimitedRetry(prompt, apiKey, label)
+                .onErrorResume(e -> {
+                    if (e instanceof AllKeysExhaustedException) {
+                        return Mono.error(e);
+                    }
+                    // Advance to next key permanently
+                    int next = currentKeyIndex.incrementAndGet();
+                    log.warn("[Gemini] Key [{}] exhausted ({}). Moving permanently to key index {}.",
+                            label, e.getMessage(), next);
+
+                    if (next >= keys.size()) {
+                        log.error("[Gemini] All keys exhausted after failing on [{}]", label);
+                        return Mono.error(new AllKeysExhaustedException("All Gemini API keys exhausted"));
+                    }
+
+                    // Recurse with the next key
+                    return tryFromCurrentKey(prompt);
                 });
     }
 
     /**
-     * Retries a single key up to 3 times on 429, with exponential backoff capped at
-     * 2 minutes.
-     * Non-429 errors are NOT retried — they propagate immediately to trigger the
-     * next key.
+     * Retries a single key up to 3 times on 429 with exponential backoff.
+     * Non-429 errors (403, 500, etc.) propagate immediately without retry.
      */
     private Mono<String> callWithLimitedRetry(String prompt, String apiKey, String keyLabel) {
         return callGemini(prompt, apiKey)
@@ -80,7 +113,6 @@ public class GeminiClient {
                         .doBeforeRetry(signal -> log.warn(
                                 "[Gemini][{}] 429 rate limit — retry #{} of 3",
                                 keyLabel, signal.totalRetries() + 1))
-                        // After 3 retries all gave 429, wrap so the next key is tried
                         .onRetryExhaustedThrow((spec, signal) -> signal.failure()));
     }
 
@@ -125,13 +157,9 @@ public class GeminiClient {
         }
     }
 
-    /**
-     * Sentinel exception to signal all keys are done — prevents further
-     * onErrorResume chains.
-     */
     public static class AllKeysExhaustedException extends RuntimeException {
-        public AllKeysExhaustedException(String message, Throwable cause) {
-            super(message, cause);
+        public AllKeysExhaustedException(String message) {
+            super(message);
         }
     }
 }
