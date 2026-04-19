@@ -2,7 +2,7 @@ name: Keep News Service Alive
 
 on:
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 */3 * * *'   # every 3 hours
   workflow_dispatch:
 
 jobs:
