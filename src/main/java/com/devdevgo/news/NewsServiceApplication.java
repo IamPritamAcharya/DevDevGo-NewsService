@@ -13,6 +13,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 @EnableScheduling
 @RequiredArgsConstructor
 public class NewsServiceApplication implements CommandLineRunner {
+
     private final NewsPipelineScheduler scheduler;
 
     public static void main(String[] args) {
